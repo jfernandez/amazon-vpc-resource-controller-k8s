@@ -162,11 +162,11 @@ func (k *k8sWrapper) AdvertiseCapacityIfNotSet(nodeName string, resourceName str
 			return err
 		}
 
-		// in case if the node is returned without initialized Capacity map for any reason
+		// in case if the node is returned without initialized Capacity or Allocatable map for any reason
 		// we need to handle the nil map gracefully and retry
 		// metav1.Status{Reason: metav1.StatusReasonConflict} is an error that is retriable regarding
 		// https://github.com/kubernetes/client-go/blob/v0.21.3/util/retry/util.go#L103-L105
-		if node.Status.Capacity == nil {
+		if node.Status.Capacity == nil || node.Status.Allocatable == nil {
 			return &errors.StatusError{
 				ErrStatus: metav1.Status{
 					Reason: metav1.StatusReasonConflict,
@@ -175,15 +175,19 @@ func (k *k8sWrapper) AdvertiseCapacityIfNotSet(nodeName string, resourceName str
 		}
 
 		existingCapacity := node.Status.Capacity[v1.ResourceName(resourceName)]
-		if !existingCapacity.IsZero() && existingCapacity.Value() == int64(capacity) {
+		existingAllocatable := node.Status.Allocatable[v1.ResourceName(resourceName)]
+		if !existingCapacity.IsZero() && existingCapacity.Value() == int64(capacity) &&
+			!existingAllocatable.IsZero() && existingAllocatable.Value() == int64(capacity) {
 			return nil
 		}
 
-		// Capacity doesn't match the expected capacity, need to advertise again
+		// Capacity or Allocatable doesn't match the expected value, need to advertise again
 		advertiseResourceRequestCallCount.WithLabelValues(resourceName).Inc()
 
 		newNode := node.DeepCopy()
 		newNode.Status.Capacity[v1.ResourceName(resourceName)] = resource.MustParse(strconv.Itoa(capacity))
+		// For extended resources, allocatable should equal capacity (no system reservations apply)
+		newNode.Status.Allocatable[v1.ResourceName(resourceName)] = resource.MustParse(strconv.Itoa(capacity))
 
 		return k.cacheClient.Status().Patch(k.context, newNode, client.MergeFrom(node))
 	})
